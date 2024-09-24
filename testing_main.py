@@ -6,16 +6,29 @@ from urllib.parse import urlparse
 from dotenv import load_dotenv
 from scrapegraphai.graphs import SmartScraperGraph
 from scrapegraphai.utils import prettify_exec_info
-from websaver import minify_html  # Importing minify_html for HTML processing
+from websaver import minify_html
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.options import Options
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
+import psutil  # Used to kill zombie processes
 
 # Load environment variables (API keys and URLs)
 load_dotenv()
+
+# Kill zombie chromedriver processes
+def kill_zombie_chromedrivers():
+    for proc in psutil.process_iter():
+        try:
+            if proc.name() == "chromedriver":
+                proc.kill()
+        except psutil.NoSuchProcess:
+            pass  # Process already terminated
+
+# Call this function before starting new drivers
+kill_zombie_chromedrivers()
 
 # Read URLs from url_list.txt
 with open('url_list.txt', 'r') as url_file:
@@ -29,12 +42,11 @@ chrome_options.add_argument("--disable-dev-shm-usage")
 
 # Initialize Selenium WebDriver using the Service object and ChromeDriverManager
 def init_driver():
-    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+    service = Service(ChromeDriverManager().install(), timeout=120)  # Increased timeout
+    return webdriver.Chrome(service=service, options=chrome_options)
 
 # Function to handle rate limit errors and extract the wait time
 def handle_rate_limit_error(message):
-    # Example message format:
-    # 'Rate limit reached for model ... Please try again in 1m24.14s.'
     match = re.search(r"try again in (\d+m\d+\.\d+s)", message)
     if match:
         wait_time_str = match.group(1)
@@ -47,9 +59,11 @@ def handle_rate_limit_error(message):
 # Define a function to scrape a single URL and return its minified HTML
 def scrape_and_process(url):
     retry_count = 3  # Retry 3 times on error
+    driver = None  # Initialize driver as None to ensure cleanup
     while retry_count > 0:
         try:
             driver = init_driver()
+            driver.set_page_load_timeout(30)  # Set a 30-second page load timeout
             driver.get(url)
 
             # Scroll to the bottom of the page to load all dynamic content
@@ -64,88 +78,81 @@ def scrape_and_process(url):
                     break
                 last_height = new_height
 
-            # Get the HTML content after the page is fully loaded and close the driver
+            # Get the HTML content after the page is fully loaded
             page_source = driver.page_source
-            driver.quit()
 
             # Minify the HTML content
             minified_html = minify_html(page_source)
 
-            # Define the configuration for the AI scraper with the Groq model
+            # Define the scraping task with a specific prompt
+            prompt = "Extract all players' names, hometowns, and high schools from the HTML."
+
+            # Configuration for the scraper
             graph_config = {
                 "llm": {
-                    "api_key": "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",  # API key for Groq
-                    "model": "groq/llama-3.1-8b-instant",  # Groq model for scraping
-                    "temperature": 0  # Set to 0 for deterministic output
+                    "api_key": os.getenv("GROQ_API_KEY"),  # Store API key in .env file
+                    "model": "groq/llama-3.1-8b-instant",
+                    "temperature": 0
                 },
                 "embeddings": {
                     "model": "ollama/nomic-embed-text",
                     "temperature": 0,
-                    "base_url": "http://localhost:11434", 
+                    "base_url": "http://localhost:11434",
                 },
                 "headless": True
             }
 
-            # Define the scraping task with a specific prompt
-            prompt = "Extract all players' names, hometowns, and high schools from the HTML."
-
-            # Create the SmartScraperGraph instance and run it with the minified HTML
+            # Create the SmartScraperGraph instance
             scraper = SmartScraperGraph(
                 prompt=prompt,
-                source=minified_html,  # Use the minified HTML content from RAM
+                source=minified_html,
                 config=graph_config,
             )
 
             # Run the scraper and get the results
             result = scraper.run()
 
-            # Check if the result has data and save it into a CSV file
+            # Process the results
             if isinstance(result, dict) and 'players' in result:
-                players = result['players']  # Extract list of players
-
-                # Generate a CSV filename based on the URL
-                domain = urlparse(url).netloc.split('.')[0]  # Corrected to extract the first part of the domain
+                players = result['players']
+                domain = urlparse(url).netloc.split('.')[0]
                 path_segments = urlparse(url).path.strip('/').split('/')
                 year = path_segments[-1]
                 csv_filename = f'{domain}_{year}_players_data.csv'
 
-                # Open a CSV file for writing
+                # Save the data to a CSV file
                 with open(csv_filename, mode='w', newline='', encoding='utf-8') as file:
                     writer = csv.writer(file)
-
-                    # Write the header row
                     writer.writerow(["Name", "Hometown", "High School"])
-
-                    # Write each player's information
                     for player in players:
                         name = player.get('name', '')
                         hometown = player.get('hometown', "Unknown")
                         high_school = player.get('high_school', "Unknown")
-
-                        # Write the row to the CSV
                         writer.writerow([name.strip(), hometown.strip(), high_school.strip()])
 
-                return  # Successfully processed this URL
-
-            retry_count = 0  # Exit retry loop if no error
+            return  # Exit after successfully processing the URL
 
         except Exception as e:
             if 'rate_limit_exceeded' in str(e) or '429' in str(e):
-                # Handle rate limit error
                 if handle_rate_limit_error(str(e)):
-                    # Don't decrement retry_count; simply retry after waiting
-                    continue
+                    continue  # Retry without decrementing the retry_count
             else:
-                retry_count -= 1  # Decrement retry count on other errors
+                retry_count -= 1
                 if retry_count == 0:
-                    # Log failed URL
                     with open('failed_urls.log', 'a') as log_file:
                         log_file.write(f"Failed to process {url}: {str(e)}\n")
                     return  # Exit after retries are exhausted
 
+        finally:
+            if driver:
+                try:
+                    driver.close()  # Close the current tab/window
+                except Exception as e_close:
+                    pass  # Ignore any errors during closing
+                driver.quit()   # Quit the browser and end the WebDriver session
 
 # Use ThreadPoolExecutor to scrape and process multiple URLs concurrently
-with ThreadPoolExecutor(max_workers=5) as executor:  # Adjust max_workers as needed
+with ThreadPoolExecutor(max_workers=10) as executor:  # Adjust max_workers as needed
     future_to_url = {executor.submit(scrape_and_process, url): url for url in urls}
 
     # Gather results as they complete
