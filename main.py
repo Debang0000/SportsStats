@@ -130,10 +130,11 @@ def scrape_and_process(url):
             retry_count = 0  # Exit retry loop if no error
 
         except Exception as e:
-            if 'rate_limit_exceeded' in str(e):
+            if 'rate_limit_exceeded' in str(e) or '429' in str(e):
                 # Handle rate limit error
                 if handle_rate_limit_error(str(e)):
-                    continue  # Retry after waiting
+                    # Don't decrement retry_count; simply retry after waiting
+                    continue
             else:
                 retry_count -= 1  # Decrement retry count on other errors
                 if retry_count == 0:
@@ -141,6 +142,7 @@ def scrape_and_process(url):
                     with open('failed_urls.log', 'a') as log_file:
                         log_file.write(f"Failed to process {url}: {str(e)}\n")
                     return  # Exit after retries are exhausted
+
 
 # Use ThreadPoolExecutor to scrape and process multiple URLs concurrently
 with ThreadPoolExecutor(max_workers=5) as executor:  # Adjust max_workers as needed
