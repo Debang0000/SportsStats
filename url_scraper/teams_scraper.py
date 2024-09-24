@@ -5,8 +5,10 @@ import time
 
 # Step 1: Scrape the Wikipedia page to get the FBS team names
 wiki_url = "https://en.wikipedia.org/wiki/List_of_NCAA_Division_I_FBS_football_programs"
+print("Fetching Wikipedia page to get FBS team names...")
 response = requests.get(wiki_url)
 soup = BeautifulSoup(response.text, 'html.parser')
+print("Wikipedia page fetched successfully!")
 
 # Find the table with the list of FBS teams
 table = soup.find('table', {'class': 'wikitable'})
@@ -17,11 +19,15 @@ for row in table.find_all('tr')[1:]:
     team_name = row.find_all('td')[0].text.strip()
     teams.append(team_name)
 
+print(f"Extracted {len(teams)} team names from Wikipedia.")
+
 # Function to find the roster URL for a specific year
 def find_roster_url(team_name, year):
     query = f"{team_name} football roster {year}"
+    print(f"Searching for {team_name}'s {year} roster...")
     try:
         for result in search(query, num=1, stop=1, pause=2):
+            print(f"Found URL for {team_name}'s {year} roster: {result}")
             return result
     except Exception as e:
         print(f"Error performing Google search for {team_name}: {e}")
@@ -29,6 +35,7 @@ def find_roster_url(team_name, year):
 
 # Function to generate URLs for 2018-2022 based on the 2018 URL
 def generate_roster_urls(base_url):
+    print(f"Generating URLs for 2018-2022 from base URL: {base_url}")
     urls = []
     for year in range(2018, 2023):
         url = base_url.replace('2018', str(year))
@@ -37,10 +44,12 @@ def generate_roster_urls(base_url):
 
 # Open the file in append mode so we can write the URLs as they are found
 file_path = 'fbs_team_roster_urls.txt'
+print(f"Opening file {file_path} to append team URLs.")
 with open(file_path, 'a') as file:  # Open file in append mode
 
     # Iterate over all teams
     for team in teams:
+        print(f"Processing team: {team}")
         try:
             # Find the 2018 roster URL for the team
             base_url = find_roster_url(team, 2018)
@@ -49,6 +58,7 @@ with open(file_path, 'a') as file:  # Open file in append mode
                 roster_urls = generate_roster_urls(base_url)
 
                 # Write the team and its URLs to the file immediately
+                print(f"Writing URLs for {team} to file.")
                 file.write(f"{team}:\n")
                 for url in roster_urls:
                     file.write(f"{url}\n")
