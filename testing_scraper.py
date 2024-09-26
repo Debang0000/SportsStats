@@ -18,7 +18,7 @@ import psutil  # Used to kill zombie processes
 # Load environment variables (API keys and URLs)
 load_dotenv()
 
-# Kill zombie chromedriver processes
+# Kill all Chromedriver processes to prevent zombie drivers
 def kill_zombie_chromedrivers():
     for proc in psutil.process_iter():
         try:
@@ -30,22 +30,22 @@ def kill_zombie_chromedrivers():
 # Call this function before starting new drivers
 kill_zombie_chromedrivers()
 
-# Read URLs from url_list.txt
+# Read URLs from url_list.txt (filter out labels such as 'Baylor:')
 with open('url_list.txt', 'r') as url_file:
-    urls = [line.strip() for line in url_file.readlines() if line.strip()]  # Get list of URLs
+    urls = [line.strip() for line in url_file.readlines() if line.startswith('http')]  # Only keep URLs
 
-# Set Chrome options (optional, for headless mode or other configurations)
+# Set Chrome options (headless mode)
 chrome_options = Options()
-chrome_options.add_argument("--headless")  # Run Chrome in headless mode (without a UI)
+chrome_options.add_argument("--headless")
 chrome_options.add_argument("--no-sandbox")
 chrome_options.add_argument("--disable-dev-shm-usage")
 
-# Initialize Selenium WebDriver using the Service object and ChromeDriverManager
+# Initialize Selenium WebDriver
 def init_driver():
-    service = Service(ChromeDriverManager().install(), timeout=120)  # Increased timeout
+    service = Service(ChromeDriverManager().install(), timeout=120)
     return webdriver.Chrome(service=service, options=chrome_options)
-
-# Function to handle rate limit errors and extract the wait time
+    
+# Function to handle rate limit errors and retry based on the wait time in the error message
 def handle_rate_limit_error(message):
     match = re.search(r"try again in (\d+m\d+\.\d+s)", message)
     if match:
@@ -56,14 +56,33 @@ def handle_rate_limit_error(message):
         return True
     return False
 
+# Create the "Data" folder if it doesn't exist
+data_folder = "Data"
+if not os.path.exists(data_folder):
+    os.makedirs(data_folder)
+
+# Function to check if CSV for a given URL already exists
+def csv_exists_for_url(url):
+    domain = urlparse(url).netloc.split('.')[0]
+    path_segments = urlparse(url).path.strip('/').split('/')
+    year = path_segments[-1]
+    csv_filename = f'{domain}_{year}_players_data.csv'
+    csv_filepath = os.path.join(data_folder, csv_filename)
+    return os.path.exists(csv_filepath)  # Returns True if file exists, False otherwise
+
 # Define a function to scrape a single URL and return its minified HTML
 def scrape_and_process(url):
+    # Skip the URL if the corresponding CSV file already exists
+    if csv_exists_for_url(url):
+        print(f"CSV for {url} already exists, skipping...")
+        return
+
     retry_count = 3  # Retry 3 times on error
-    driver = None  # Initialize driver as None to ensure cleanup
+    driver = None
     while retry_count > 0:
         try:
             driver = init_driver()
-            driver.set_page_load_timeout(30)  # Set a 30-second page load timeout
+            driver.set_page_load_timeout(30)
             driver.get(url)
 
             # Scroll to the bottom of the page to load all dynamic content
@@ -84,13 +103,13 @@ def scrape_and_process(url):
             # Minify the HTML content
             minified_html = minify_html(page_source)
 
-            # Define the scraping task with a specific prompt
+            # Define the scraping task prompt
             prompt = "Extract all players' names, hometowns, and high schools from the HTML."
 
             # Configuration for the scraper
             graph_config = {
                 "llm": {
-                    "api_key": os.getenv("GROQ_API_KEY"),  # Store API key in .env file
+                    "api_key": os.getenv("GROQ_API_KEY"),
                     "model": "groq/llama-3.1-8b-instant",
                     "temperature": 0
                 },
@@ -120,8 +139,9 @@ def scrape_and_process(url):
                 year = path_segments[-1]
                 csv_filename = f'{domain}_{year}_players_data.csv'
 
-                # Save the data to a CSV file
-                with open(csv_filename, mode='w', newline='', encoding='utf-8') as file:
+                # Save the data to a CSV file in the "Data" folder
+                csv_filepath = os.path.join(data_folder, csv_filename)
+                with open(csv_filepath, mode='w', newline='', encoding='utf-8') as file:
                     writer = csv.writer(file)
                     writer.writerow(["Name", "Hometown", "High School"])
                     for player in players:
@@ -141,18 +161,18 @@ def scrape_and_process(url):
                 if retry_count == 0:
                     with open('failed_urls.log', 'a') as log_file:
                         log_file.write(f"Failed to process {url}: {str(e)}\n")
-                    return  # Exit after retries are exhausted
+                    return
 
         finally:
             if driver:
                 try:
-                    driver.close()  # Close the current tab/window
+                    driver.close()
                 except Exception as e_close:
-                    pass  # Ignore any errors during closing
-                driver.quit()   # Quit the browser and end the WebDriver session
+                    pass  # Ignore errors during closing
+                driver.quit()  # Quit the browser and end the WebDriver session
 
 # Use ThreadPoolExecutor to scrape and process multiple URLs concurrently
-with ThreadPoolExecutor(max_workers=10) as executor:  # Adjust max_workers as needed
+with ThreadPoolExecutor(max_workers=5) as executor:
     future_to_url = {executor.submit(scrape_and_process, url): url for url in urls}
 
     # Gather results as they complete
@@ -161,6 +181,6 @@ with ThreadPoolExecutor(max_workers=10) as executor:  # Adjust max_workers as ne
         try:
             future.result()
         except Exception as exc:
-            # If there's a problem that isn't rate-limit related, it should be logged
+            # Log errors
             with open('failed_urls.log', 'a') as log_file:
                 log_file.write(f"Failed to complete {url}: {str(exc)}\n")
