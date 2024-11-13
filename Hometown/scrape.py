@@ -5,7 +5,7 @@ import os
 import time
 
 # Define the range of years you want to scrape data for
-years = [2018, 2019, 2020, 2021, 2022]
+years = [2023]
 
 # Base URL of the website
 base_url = 'https://cfbstats.com'
